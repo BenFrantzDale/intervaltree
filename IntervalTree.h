@@ -35,11 +35,19 @@ template <class Scalar, typename Value>
     return out;
 }
 
-template <class Scalar, typename Value = std::size_t>
 class IntervalStartSorter {
 public:
-    bool operator()(const Interval<Scalar,Value>& a, const Interval<Scalar,Value>& b) {
+    template <class Scalar, typename Value>
+    bool operator()(const Interval<Scalar, Value>& a, const Interval<Scalar, Value>& b) {
         return a.start < b.start;
+    }
+};
+
+class IntervalStopSorter {
+public:
+    template <class Scalar, typename Value>
+    bool operator()(const Interval<Scalar, Value>& a, const Interval<Scalar, Value>& b) {
+        return a.stop < b.stop;
     }
 };
 
@@ -64,17 +72,16 @@ public:
     IntervalTree(IntervalTree&&) = default;
     IntervalTree& operator=(IntervalTree&&) = default;
 
+    std::unique_ptr<IntervalTree> clone() const {
+        return std::unique_ptr<IntervalTree>(new IntervalTree(*this));
+    }
+
     std::size_t bytes_used() const {
         return (sizeof(*this) +
                 sizeof(interval_vector::value_type) * intervals.capacity() +
                 left  ? left->bytes_used()  : 0 +
                 right ? right->bytes_used() : 0);
     }
-private:
-    std::unique_ptr<IntervalTree> clone() const {
-        return std::unique_ptr<IntervalTree>(new IntervalTree(*this));
-    }
-public:
 
     IntervalTree<Scalar,Value>(const IntervalTree& other)
     :   intervals(other.intervals),
@@ -84,8 +91,6 @@ public:
     {
     }
 
-public:
-
     IntervalTree<Scalar,Value>& operator=(const IntervalTree& other) {
         center = other.center;
         intervals = other.intervals;
@@ -94,9 +99,9 @@ public:
         return *this;
     }
 
-    // Note: changes the order of ivals
+    // Note: changes the order of ivals, hence taking it by rvalue reference.
     IntervalTree<Scalar,Value>(
-            interval_vector& ivals,
+            interval_vector&& ivals,
             std::size_t depth = 16,
             std::size_t minbucket = 64,
             Value leftextent = 0,
@@ -108,14 +113,13 @@ public:
     {
 
         --depth;
-        IntervalStartSorter<Scalar,Value> intervalStartSorter;
         if (depth == 0 || (ivals.size() < minbucket && ivals.size() < maxbucket)) {
-            std::sort(ivals.begin(), ivals.end(), intervalStartSorter);
-            intervals = ivals;
+            std::sort(ivals.begin(), ivals.end(), IntervalStartSorter());
+            intervals = std::move(ivals);
         } else {
             if (leftextent == 0 && rightextent == 0) {
                 // sort intervals by start
-              std::sort(ivals.begin(), ivals.end(), intervalStartSorter);
+                std::sort(ivals.begin(), ivals.end(), IntervalStartSorter());
             }
 
             Value leftp = 0;
@@ -127,13 +131,10 @@ public:
                 rightp = rightextent;
             } else {
                 leftp = ivals.front().start;
-                std::vector<Value> stops;
-                stops.resize(ivals.size());
-                transform(ivals.begin(), ivals.end(), stops.begin(), intervalStop<Scalar,Value>);
-                rightp = *max_element(stops.begin(), stops.end());
+                rightp = std::max_element(ivals.begin(), ivals.end(), IntervalStopSorter())->stop;
             }
 
-            centerp = ivals.at(ivals.size() / 2).start;
+            centerp = ivals[ivals.size() / 2].start;
             center = centerp;
 
             interval_vector lefts;
@@ -150,45 +151,44 @@ public:
             }
 
             if (!lefts.empty()) {
-                left = std::unique_ptr<IntervalTree>(new IntervalTree(lefts, depth, minbucket, leftp, centerp));
+                left = std::unique_ptr<IntervalTree>(new IntervalTree(std::move(lefts), depth, minbucket, leftp, centerp));
             }
             if (!rights.empty()) {
-                right = std::unique_ptr<IntervalTree>(new IntervalTree(rights, depth, minbucket, centerp, rightp));
+                right = std::unique_ptr<IntervalTree>(new IntervalTree(std::move(rights), depth, minbucket, centerp, rightp));
             }
         }
     }
 
     interval_vector findOverlapping(const Scalar & pos) const {
-      return findOverlapping(pos, pos);
+        return findOverlapping(pos, pos);
     }
 
     interval_vector findOverlapping(const Scalar & start, const Scalar & stop) const {
-      interval_vector ov;
-      findOverlapping(start, stop, [&ov](const interval& i) { ov.push_back(i); });
-      return ov;
+        interval_vector ov;
+        findOverlapping(start, stop, [&ov](const interval& i) { ov.push_back(i); });
+        return ov;
     }
 
     template <typename F>
-    F findOverlapping(const Scalar & pos, F overlapping) const {
-        return findOverlapping(pos, pos, std::move(overlapping));
+    void findOverlapping(const Scalar & pos, F overlapping) const {
+        findOverlapping(pos, pos, overlapping);
     }
 
     template <typename F>
-    F findOverlapping(const Scalar & start, const Scalar & stop, F overlapping) const {
+    void findOverlapping(const Scalar & start, const Scalar & stop, F overlapping) const {
         if (left && start <= center) {
-            overlapping = left->findOverlapping(start, stop, overlapping);
+            left->findOverlapping(start, stop, overlapping);
         }
         if (!intervals.empty() && stop >= intervals.front().start) {
             for (const interval& interval : intervals) {
                 if (interval.stop >= start && interval.start <= stop) {
-                    overlapping = overlapping(interval);
+                    overlapping(interval);
                 }
             }
         }
         if (right && stop >= center) {
-            overlapping = right->findOverlapping(start, stop, overlapping);
+            right->findOverlapping(start, stop, overlapping);
         }
-        return std::move(overlapping);
     }
 
     interval_vector findContained(Value start, Value stop) const {
@@ -198,7 +198,7 @@ public:
     }
 
     template <typename F>
-    F findContained(Value start, Value stop, F contained) const {
+    void findContained(Value start, Value stop, F contained) const {
         if (!intervals.empty() && !(stop < intervals.front().start)) {
             for (const interval & interv : intervals) {
                 if (interv.start >= start && interv.stop <= stop) {
@@ -208,13 +208,12 @@ public:
         }
 
         if (left && start <= center) {
-            contained = left->findContained(start, stop, std::move(contained));
+            left->findContained(start, stop, contained);
         }
 
         if (right && stop >= center) {
-            contained = right->findContained(start, stop, std::move(contained));
+            right->findContained(start, stop, contained);
         }
-        return std::move(contained); // Return std::move(f) just like std::for_each does.
     }
 
     ~IntervalTree(void) = default;
