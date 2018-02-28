@@ -38,7 +38,7 @@ template <class Scalar, typename Value>
 template <class Scalar, typename Value = std::size_t>
 class IntervalStartSorter {
 public:
-    bool operator() (const Interval<Scalar,Value>& a, const Interval<Scalar,Value>& b) {
+    bool operator()(const Interval<Scalar,Value>& a, const Interval<Scalar,Value>& b) {
         return a.start < b.start;
     }
 };
@@ -214,7 +214,7 @@ public:
         if (right && stop >= center) {
             contained = right->findContained(start, stop, std::move(contained));
         }
-        return std::move(contained);
+        return std::move(contained); // Return std::move(f) just like std::for_each does.
     }
 
     ~IntervalTree(void) = default;
