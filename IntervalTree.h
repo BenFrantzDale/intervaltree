@@ -66,9 +66,6 @@ public:
 
     explicit IntervalTreeBase(StartStopFn ssf = StartStopFn())
         : startStopFn(ssf)
-        , left(nullptr)
-        , right(nullptr)
-        , center(0)
     {}
 
     ~IntervalTreeBase() = default;
@@ -79,10 +76,7 @@ public:
 
     IntervalTreeBase(const IntervalTreeBase& other)
     :   startStopFn(other.startStopFn),
-        intervals(other.intervals),
-        left(other.left ? other.left->clone() : nullptr),
-        right(other.right ? other.right->clone() : nullptr),
-        center(other.center)
+        tree(other.tree)
     {}
 
     IntervalTreeBase& operator=(IntervalTreeBase&&) = default;
@@ -90,10 +84,7 @@ public:
 
     IntervalTreeBase& operator=(const IntervalTreeBase& other) {
         startStopFn = other.startStopFn;
-        center = other.center;
-        intervals = other.intervals;
-        left = other.left ? other.left->clone() : nullptr;
-        right = other.right ? other.right->clone() : nullptr;
+        tree = other.tree;
         return *this;
     }
 
@@ -105,102 +96,25 @@ public:
             std::size_t maxbucket = 512, 
             Scalar leftextent = 0,
             Scalar rightextent = 0)
-      : startStopFn(ssf)
-      , left(nullptr)
-      , right(nullptr)
-    {
-        --depth;
-        const auto minmaxStop = std::minmax_element(ivals.begin(), ivals.end(), 
-                                                    IntervalStopCmp{startStopFn});
-        const auto minmaxStart = std::minmax_element(ivals.begin(), ivals.end(), 
-                                                     IntervalStartCmp{startStopFn});
-        if (!ivals.empty()) {
-            center = (minmaxStart.first->start + minmaxStop.second->stop) / 2;
-        }
-        if (leftextent == 0 && rightextent == 0) {
-            // sort intervals by start
-            std::sort(ivals.begin(), ivals.end(), IntervalStartCmp{startStopFn});
-        } else {
-            assert(std::is_sorted(ivals.begin(), ivals.end(), IntervalStartCmp{startStopFn}));
-        }
-        if (depth == 0 || (ivals.size() < minbucket && ivals.size() < maxbucket)) {
-            std::sort(ivals.begin(), ivals.end(), IntervalStartCmp{startStopFn});
-            intervals = std::move(ivals);
-            assert(is_valid().first);
-            return;
-        } else {
-            Scalar leftp = 0;
-            Scalar rightp = 0;
-
-            if (leftextent || rightextent) {
-                leftp = leftextent;
-                rightp = rightextent;
-            } else {
-                leftp = ivals.front().start;
-                rightp = startStopFn.stop(*std::max_element(ivals.begin(), ivals.end(),
-                                                            IntervalStopCmp{startStopFn}));
-            }
-
-            // Could probably use std::partition and pass an iterator range instead of passing by reference.
-            interval_vector lefts;
-            interval_vector rights;
-
-            for (typename interval_vector::const_iterator i = ivals.begin(); 
-                 i != ivals.end(); ++i) {
-                const interval& intrvl = *i;
-                if (startStopFn.stop(intrvl) < center) {
-                    lefts.push_back(intrvl);
-                } else if (startStopFn.start(intrvl)> center) {
-                    rights.push_back(intrvl);
-                } else {
-                    assert(startStopFn.start(intrvl) <= center);
-                    assert(center <= startStopFn.stop(intrvl));
-                    intervals.push_back(intrvl);
-                }
-            }
-
-            if (!lefts.empty()) {
-                left.reset(new IntervalTreeBase(std::move(lefts),
-                                                startStopFn,
-                                                depth, minbucket, maxbucket,
-                                                leftp, center));
-            }
-            if (!rights.empty()) {
-                right.reset(new IntervalTreeBase(std::move(rights),
-                                                 startStopFn,
-                                                 depth, minbucket, maxbucket,
-                                                 center, rightp));
-            }
-        }
-        assert(is_valid().first);
-    }
+      : startStopFn(ssf),
+        tree(std::move(ivals),
+             ssf,
+             depth,
+             minbucket, maxbucket,
+             leftextent,
+             rightextent)
+    {}
 
     Scalar min() const {
-        assert(!empty());
-        if (left) { return left->min(); }
-        return startStopFn.start(*std::min_element(intervals.begin(), intervals.end(),
-                                                   IntervalStartCmp{startStopFn}));
+        return tree.min(startStopFn);
     }
     Scalar max() const {
-        assert(!empty());
-        if (right) { return right->max(); }
-        return startStopFn.stop(*std::max_element(intervals.begin(), intervals.end(),
-                                                  IntervalStopCmp{startStopFn}));
+        return tree.max(startStopFn);
     }
     // Call f on all intervals near the range [start, stop]:
     template <class UnaryFunction>
     void visit_near(const Scalar& start, const Scalar& stop, UnaryFunction f) const {
-        if (!intervals.empty() && ! (stop < startStopFn.start(intervals.front()))) {
-            for (auto & i : intervals) {
-              f(i);
-            }
-        }
-        if (left && start <= center) {
-            left->visit_near(start, stop, f);
-        }
-        if (right && stop >= center) {
-            right->visit_near(start, stop, f);
-        }
+        tree.visit_near(start, stop, f, startStopFn);
     }
 
     // Call f on all intervals crossing pos
@@ -250,27 +164,12 @@ public:
         return result;
     }
     bool empty() const {
-        if (left && !left->empty()) {
-            return false;
-        }
-        if (!intervals.empty()) { 
-            return false;
-        }
-        if (right && !right->empty()) {
-            return false;
-        }
-        return true;
+        return tree.empty();
     }
 
     template <class UnaryFunction>
     void visit_all(UnaryFunction f) const {
-        if (left) {
-            left->visit_all(f);
-        }
-        std::for_each(intervals.begin(), intervals.end(), f);
-        if (right) {
-            right->visit_all(f);
-        }
+        tree.visit_all(f);
     }
 
     std::pair<Scalar, Scalar> extentBruitForce() const {
@@ -292,43 +191,7 @@ public:
     // Check all constraints.
     // If first is false, second is invalid.
     std::pair<bool, std::pair<Scalar, Scalar>> is_valid() const {
-        const auto minmaxStop = std::minmax_element(intervals.begin(), intervals.end(), 
-                                                    IntervalStopCmp{startStopFn});
-        const auto minmaxStart = std::minmax_element(intervals.begin(), intervals.end(), 
-                                                     IntervalStartCmp{startStopFn});
-        
-        std::pair<bool, std::pair<Scalar, Scalar>> result = {true, { std::numeric_limits<Scalar>::max(),
-                                                                     std::numeric_limits<Scalar>::min() }};
-        if (!intervals.empty()) {
-            result.second.first   = std::min(result.second.first,  startStopFn.start(*minmaxStart.first));
-            result.second.second  = std::min(result.second.second, startStopFn.stop(*minmaxStop.second));
-        }
-        if (left) {
-            auto valid = left->is_valid();
-            result.first &= valid.first;
-            result.second.first   = std::min(result.second.first,  valid.second.first);
-            result.second.second  = std::min(result.second.second, valid.second.second);
-            if (!result.first) { return result; }
-            if (valid.second.second >= center) {
-                result.first = false;
-                return result;
-            }
-        }
-        if (right) {
-            auto valid = right->is_valid();
-            result.first &= valid.first;
-            result.second.first   = std::min(result.second.first,  valid.second.first);
-            result.second.second  = std::min(result.second.second, valid.second.second);
-            if (!result.first) { return result; }
-            if (valid.second.first <= center) { 
-                result.first = false;
-                return result;
-            }
-        }
-        if (!std::is_sorted(intervals.begin(), intervals.end(), IntervalStartCmp{startStopFn})) {
-            result.first = false;
-        }
-        return result;        
+        return tree.is_valid(startStopFn);
     }
 
     friend std::ostream& operator<<(std::ostream& os, const IntervalTreeBase& itree) {
@@ -364,6 +227,170 @@ private:
         interval_vector intervals;
         std::unique_ptr<Node> left;
         std::unique_ptr<Node> right;
+
+        Node(interval_vector&& ivals,
+             StartStopFn& startStopFn = StartStopFn(),
+             std::size_t depth = 16,
+             std::size_t minbucket = 64,
+             std::size_t maxbucket = 512,
+             Scalar leftextent = 0,
+             Scalar rightextent = 0)
+        {
+            --depth;
+            const auto minmaxStop = std::minmax_element(ivals.begin(), ivals.end(),
+                                                        IntervalStopCmp{startStopFn});
+            const auto minmaxStart = std::minmax_element(ivals.begin(), ivals.end(),
+                                                         IntervalStartCmp{startStopFn});
+            if (!ivals.empty()) {
+                center = (startStopFn.start(*minmaxStart.first) + startStopFn.stop(*minmaxStop.second)) / 2;
+            }
+            if (leftextent == 0 && rightextent == 0) {
+                // sort intervals by start
+                std::sort(ivals.begin(), ivals.end(), IntervalStartCmp{startStopFn});
+            } else {
+                assert(std::is_sorted(ivals.begin(), ivals.end(), IntervalStartCmp{startStopFn}));
+            }
+            if (depth == 0 || (ivals.size() < minbucket && ivals.size() < maxbucket)) {
+                std::sort(ivals.begin(), ivals.end(), IntervalStartCmp{startStopFn});
+                intervals = std::move(ivals);
+                assert(is_valid(startStopFn).first);
+                return;
+            } else {
+                Scalar leftp = 0;
+                Scalar rightp = 0;
+
+                if (leftextent || rightextent) {
+                    leftp = leftextent;
+                    rightp = rightextent;
+                } else {
+                    leftp = startStopFn.start(ivals.front());
+                    rightp = startStopFn.stop(*std::max_element(ivals.begin(), ivals.end(),
+                                                                IntervalStopCmp{startStopFn}));
+                }
+
+                // Could probably use std::partition and pass an iterator range instead of passing by reference.
+                interval_vector lefts;
+                interval_vector rights;
+
+                for (typename interval_vector::const_iterator i = ivals.begin();
+                     i != ivals.end(); ++i) {
+                    const interval& intrvl = *i;
+                    if (startStopFn.stop(intrvl) < center) {
+                        lefts.push_back(intrvl);
+                    } else if (startStopFn.start(intrvl)> center) {
+                        rights.push_back(intrvl);
+                    } else {
+                        assert(startStopFn.start(intrvl) <= center);
+                        assert(center <= startStopFn.stop(intrvl));
+                        intervals.push_back(intrvl);
+                    }
+                }
+
+                if (!lefts.empty()) {
+                    left.reset(new Node(std::move(lefts),
+                                        startStopFn,
+                                        depth, minbucket, maxbucket,
+                                        leftp, center));
+                }
+                if (!rights.empty()) {
+                    right.reset(new Node(std::move(rights),
+                                         startStopFn,
+                                         depth, minbucket, maxbucket,
+                                         center, rightp));
+                }
+            }
+            assert(is_valid(startStopFn).first);
+        }
+        bool empty() const {
+            if (left && !left->empty()) {
+                return false;
+            }
+            if (!intervals.empty()) {
+                return false;
+            }
+            if (right && !right->empty()) {
+                return false;
+            }
+            return true;
+        }
+
+        Scalar min(const StartStopFn& startStopFn) const {
+            assert(!empty());
+            if (left) { return left->min(startStopFn); }
+            return startStopFn.start(*std::min_element(intervals.begin(), intervals.end(),
+                                                       IntervalStartCmp{startStopFn}));
+        }
+        Scalar max(const StartStopFn& startStopFn) const {
+            assert(!empty());
+            if (right) { return right->max(startStopFn); }
+            return startStopFn.stop(*std::max_element(intervals.begin(), intervals.end(),
+                                                      IntervalStopCmp{startStopFn}));
+        }
+        template <class UnaryFunction>
+        void visit_near(const Scalar& start, const Scalar& stop, UnaryFunction f, const StartStopFn& startStopFn) const {
+            if (!intervals.empty() && ! (stop < startStopFn.start(intervals.front()))) {
+                for (auto & i : intervals) {
+                    f(i);
+                }
+            }
+            if (left && start <= center) {
+                left->visit_near(start, stop, f, startStopFn);
+            }
+            if (right && stop >= center) {
+                right->visit_near(start, stop, f, startStopFn);
+            }
+        }
+        template <class UnaryFunction>
+        void visit_all(UnaryFunction f) const {
+            if (left) {
+                left->visit_all(f);
+            }
+            std::for_each(intervals.begin(), intervals.end(), f);
+            if (right) {
+                right->visit_all(f);
+            }
+        }
+        // Check all constraints.
+        // If first is false, second is invalid.
+        std::pair<bool, std::pair<Scalar, Scalar>> is_valid(const StartStopFn& startStopFn) const {
+            const auto minmaxStop = std::minmax_element(intervals.begin(), intervals.end(),
+                                                        IntervalStopCmp{startStopFn});
+            const auto minmaxStart = std::minmax_element(intervals.begin(), intervals.end(),
+                                                         IntervalStartCmp{startStopFn});
+
+            std::pair<bool, std::pair<Scalar, Scalar>> result = {true, { std::numeric_limits<Scalar>::max(),
+                                                                         std::numeric_limits<Scalar>::min() }};
+            if (!intervals.empty()) {
+                result.second.first   = std::min(result.second.first,  startStopFn.start(*minmaxStart.first));
+                result.second.second  = std::min(result.second.second, startStopFn.stop(*minmaxStop.second));
+            }
+            if (left) {
+                auto valid = left->is_valid(startStopFn);
+                result.first &= valid.first;
+                result.second.first   = std::min(result.second.first,  valid.second.first);
+                result.second.second  = std::min(result.second.second, valid.second.second);
+                if (!result.first) { return result; }
+                if (valid.second.second >= center) {
+                    result.first = false;
+                    return result;
+                }
+            }
+            if (right) {
+                auto valid = right->is_valid(startStopFn);
+                result.first &= valid.first;
+                result.second.first   = std::min(result.second.first,  valid.second.first);
+                result.second.second  = std::min(result.second.second, valid.second.second);
+                if (!result.first) { return result; }
+                if (valid.second.first <= center) {
+                    result.first = false;
+                    return result;
+                }
+            }
+            if (!std::is_sorted(intervals.begin(), intervals.end(), IntervalStartCmp{startStopFn})) {
+                result.first = false;
+            }
+            return result;
+        }
     };
     Node tree;
 };
