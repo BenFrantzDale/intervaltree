@@ -97,7 +97,7 @@ public:
             Scalar leftextent = 0,
             Scalar rightextent = 0)
       : startStopFn(ssf),
-        tree(std::move(ivals),
+        tree(ivals.begin(), ivals.end(),
              ssf,
              depth,
              minbucket, maxbucket,
@@ -228,7 +228,9 @@ private:
         std::unique_ptr<Node> left;
         std::unique_ptr<Node> right;
 
-        Node(interval_vector&& ivals,
+        template <typename IntervalIter>
+        Node(const IntervalIter begIntervals,
+             const IntervalIter endIntervals,
              StartStopFn& startStopFn = StartStopFn(),
              std::size_t depth = 16,
              std::size_t minbucket = 64,
@@ -236,23 +238,25 @@ private:
              Scalar leftextent = 0,
              Scalar rightextent = 0)
         {
+            assert(begIntervals <= endIntervals); // Shouldn't be here with empty range.
+            const auto nIntervals = static_cast<std::size_t>(std::distance(begIntervals, endIntervals));
             --depth;
-            const auto minmaxStop = std::minmax_element(ivals.begin(), ivals.end(),
+            const auto minmaxStop = std::minmax_element(begIntervals, endIntervals,
                                                         IntervalStopCmp{startStopFn});
-            const auto minmaxStart = std::minmax_element(ivals.begin(), ivals.end(),
+            const auto minmaxStart = std::minmax_element(begIntervals, endIntervals,
                                                          IntervalStartCmp{startStopFn});
-            if (!ivals.empty()) {
+            if (begIntervals != endIntervals) {
                 center = (startStopFn.start(*minmaxStart.first) + startStopFn.stop(*minmaxStop.second)) / 2;
             }
             if (leftextent == 0 && rightextent == 0) {
                 // sort intervals by start
-                std::sort(ivals.begin(), ivals.end(), IntervalStartCmp{startStopFn});
+                std::sort(begIntervals, endIntervals, IntervalStartCmp{startStopFn});
             } else {
-                assert(std::is_sorted(ivals.begin(), ivals.end(), IntervalStartCmp{startStopFn}));
+                assert(std::is_sorted(begIntervals, endIntervals, IntervalStartCmp{startStopFn}));
             }
-            if (depth == 0 || (ivals.size() < minbucket && ivals.size() < maxbucket)) {
-                std::sort(ivals.begin(), ivals.end(), IntervalStartCmp{startStopFn});
-                intervals = std::move(ivals);
+            if (depth == 0 || (nIntervals < minbucket && nIntervals < maxbucket)) {
+                std::sort(begIntervals, endIntervals, IntervalStartCmp{startStopFn});
+                intervals = interval_vector(begIntervals, endIntervals);
                 assert(is_valid(startStopFn).first);
                 return;
             } else {
@@ -263,37 +267,32 @@ private:
                     leftp = leftextent;
                     rightp = rightextent;
                 } else {
-                    leftp = startStopFn.start(ivals.front());
-                    rightp = startStopFn.stop(*std::max_element(ivals.begin(), ivals.end(),
+                    leftp = startStopFn.start(*begIntervals);
+                    rightp = startStopFn.stop(*std::max_element(begIntervals, endIntervals,
                                                                 IntervalStopCmp{startStopFn}));
                 }
 
-                // Could probably use std::partition and pass an iterator range instead of passing by reference.
-                interval_vector lefts;
-                interval_vector rights;
-
-                for (typename interval_vector::const_iterator i = ivals.begin();
-                     i != ivals.end(); ++i) {
-                    const interval& intrvl = *i;
-                    if (startStopFn.stop(intrvl) < center) {
-                        lefts.push_back(intrvl);
-                    } else if (startStopFn.start(intrvl)> center) {
-                        rights.push_back(intrvl);
-                    } else {
-                        assert(startStopFn.start(intrvl) <= center);
-                        assert(center <= startStopFn.stop(intrvl));
-                        intervals.push_back(intrvl);
-                    }
-                }
-
-                if (!lefts.empty()) {
-                    left.reset(new Node(std::move(lefts),
+                //auto leftEnds = std::partition(begIntervals, endIntervals, [&](const interval& intrvl) { return startStopFn.stop(intrvl) < center; });
+                // Should be sorted?
+                auto leftEnds = std::find_if(begIntervals, endIntervals, [&](const interval& intrvl) { return !(startStopFn.stop(intrvl) < center); });
+                assert(begIntervals <= leftEnds);
+                assert(leftEnds <= endIntervals);
+                // Now partition the stuff that belongs to this tree node to the left of the stuff that goes in the right child:
+                //auto rightBeg = std::partition(leftEnds, endIntervals, [&](const interval& intrvl) { return !(startStopFn.start(intrvl) > center); });
+                auto rightBeg = std::find_if(leftEnds, endIntervals, [&](const interval& intrvl) { return startStopFn.start(intrvl) > center; });
+                assert(begIntervals <= rightBeg);
+                assert(leftEnds <= rightBeg);
+                assert(rightBeg <= endIntervals);
+                assert(rightBeg <= endIntervals);
+                intervals = interval_vector(leftEnds, rightBeg);
+                if (begIntervals != leftEnds) {
+                    left.reset(new Node(begIntervals, leftEnds,
                                         startStopFn,
                                         depth, minbucket, maxbucket,
                                         leftp, center));
                 }
-                if (!rights.empty()) {
-                    right.reset(new Node(std::move(rights),
+                if (rightBeg != endIntervals) {
+                    right.reset(new Node(rightBeg, endIntervals,
                                          startStopFn,
                                          depth, minbucket, maxbucket,
                                          center, rightp));
